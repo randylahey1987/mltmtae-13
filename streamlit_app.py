@@ -170,7 +170,7 @@ def evaluate_mask(pairs, mask):
 
 
 def monthly_breakdown(pairs, mask):
-    """Monthly W/L/profit table like the user's screenshot."""
+    """Monthly W/L/profit table like the user's screenshot. Includes ROI column."""
     matches = pairs[mask].copy()
     if len(matches) == 0:
         return pd.DataFrame()
@@ -186,19 +186,65 @@ def monthly_breakdown(pairs, mask):
         w_profit = sub.loc[sub['result'] == 'W', 'profit'].sum()
         l_profit = sub.loc[sub['result'] == 'L', 'profit'].sum()
         total = sub['profit'].sum()
+        roi = (total / risk) if risk > 0 else np.nan
         rows.append({
             'Month': name, 'Wins': int(wins), 'Losses': int(losses),
             'Risk': round(risk, 2), 'W $': round(w_profit, 2),
-            'L $': round(l_profit, 2), 'Total $': round(total, 2)
+            'L $': round(l_profit, 2), 'Total $': round(total, 2),
+            'ROI': roi,
         })
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
+    total_risk = out['Risk'].sum()
+    total_profit = out['Total $'].sum()
+    total_roi = (total_profit / total_risk) if total_risk > 0 else np.nan
     total_row = {'Month': 'TOTAL', 'Wins': out['Wins'].sum(), 'Losses': out['Losses'].sum(),
-                 'Risk': round(out['Risk'].sum(), 2), 'W $': round(out['W $'].sum(), 2),
-                 'L $': round(out['L $'].sum(), 2), 'Total $': round(out['Total $'].sum(), 2)}
+                 'Risk': round(total_risk, 2), 'W $': round(out['W $'].sum(), 2),
+                 'L $': round(out['L $'].sum(), 2), 'Total $': round(total_profit, 2),
+                 'ROI': total_roi}
     out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
     return out
+
+
+def _fmt_money(x):
+    """Format as $1,234.56 or -$1,234.56 (sign before $)."""
+    if pd.isna(x):
+        return "—"
+    if x < 0:
+        return f"-${abs(x):,.2f}"
+    return f"${x:,.2f}"
+
+
+def format_monthly_table(df):
+    """Apply $ formatting, % formatting, and bold-the-TOTAL-row styling."""
+    if df.empty:
+        return df
+    formatted = df.copy()
+    formatted['Risk'] = formatted['Risk'].apply(_fmt_money)
+    formatted['W $'] = formatted['W $'].apply(_fmt_money)
+    formatted['L $'] = formatted['L $'].apply(_fmt_money)
+    formatted['Total $'] = formatted['Total $'].apply(_fmt_money)
+    formatted['ROI'] = formatted['ROI'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
+
+    def bold_total(row):
+        is_total = row['Month'] == 'TOTAL'
+        return ['font-weight: bold; background-color: rgba(255, 215, 0, 0.15)' if is_total else '' for _ in row]
+
+    return formatted.style.apply(bold_total, axis=1)
+
+
+def format_games_table(games_df):
+    """Apply $ and date formatting for the matched-games table on Tab 4."""
+    if games_df is None or len(games_df) == 0:
+        return games_df
+    formatted = games_df.copy()
+    if 'date' in formatted.columns:
+        formatted['date'] = pd.to_datetime(formatted['date']).dt.strftime('%m/%d/%Y')
+    for col in ['risk', 'profit', 'cumulative']:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].apply(_fmt_money)
+    return formatted
 
 
 # ============================================================
@@ -234,12 +280,17 @@ c4.metric("Stat Features", f"{len(stat_names)}")
 st.caption(f"Date range: {pairs['date'].min().date()} → {pairs['date'].max().date()}. "
            "A 'pair' = a previous game's stats matched to the team's next home game outcome (B[prev]=H[current]).")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Test One Pattern",
     "🔍 Threshold Brute-Force",
     "🧠 Auto-Multiplier (ML)",
-    "📋 Inspect Games"
+    "📋 Inspect Games",
+    "⭐ Saved Favorites",
 ])
+
+# Initialize favorites in session state
+if 'favorites' not in st.session_state:
+    st.session_state['favorites'] = []
 
 # ============================================================
 # TAB 1: Single pattern with multipliers
@@ -267,7 +318,16 @@ with tab1:
     else:
         thresh = st.number_input("Threshold", value=0.0, format="%.4f", key="t1_thr")
 
-    if st.button("Run backtest", type="primary", key="t1_run"):
+    btn_col1, btn_col2 = st.columns([1, 1])
+    run_clicked = btn_col1.button("Run backtest", type="primary", key="t1_run")
+    clear_clicked = btn_col2.button("🗑️ Clear results", key="t1_clear")
+
+    if clear_clicked:
+        for k in ['t1_stats', 't1_mask', 't1_eq', 't1_monthly']:
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    if run_clicked:
         # Build the score
         score = np.zeros(len(pairs))
         for col, m in col_keys:
@@ -282,6 +342,25 @@ with tab1:
 
         stats = evaluate_mask(pairs, mask)
 
+        # Equation display
+        eq_parts = [f"{m:.3f}*{c}" for c, m in col_keys]
+        op_str = operator if operator != "between" else f"between {thresh_lo} and {thresh_hi}"
+        eq_str = " + ".join(eq_parts) + f" {op_str}" + (f" {thresh}" if operator != "between" else "")
+
+        # Persist
+        st.session_state['t1_stats'] = stats
+        st.session_state['t1_mask'] = mask
+        st.session_state['t1_eq'] = eq_str
+        st.session_state['t1_monthly'] = monthly_breakdown(pairs, mask)
+
+        # Also save for Tab 4
+        st.session_state['last_mask'] = mask
+        st.session_state['last_eq'] = eq_str
+
+    # Display the persisted results (so they don't vanish on rerun)
+    if 't1_stats' in st.session_state:
+        stats = st.session_state['t1_stats']
+
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Occurrences", f"{stats['count']:,}")
         m2.metric("Win Rate", f"{stats['win_rate']:.1%}" if pd.notna(stats['win_rate']) else "—")
@@ -289,19 +368,13 @@ with tab1:
         m4.metric("ROI", f"{stats['roi']:.1%}" if pd.notna(stats['roi']) else "—")
         m5.metric("Lowest Pt", f"${stats['lowest']:,.2f}" if pd.notna(stats['lowest']) else "—")
 
-        # Equation display
-        eq_parts = [f"{m:.3f}*{c}" for c, m in col_keys]
-        op_str = operator if operator != "between" else f"between {thresh_lo} and {thresh_hi}"
-        eq_str = " + ".join(eq_parts) + f" {op_str}" + (f" {thresh}" if operator != "between" else "")
-        st.code(eq_str, language="text")
+        st.code(st.session_state['t1_eq'], language="text")
 
-        # Monthly breakdown
+        # Monthly breakdown — formatted with $/% and bolded TOTAL row
         st.markdown("**Monthly breakdown**")
-        st.dataframe(monthly_breakdown(pairs, mask), use_container_width=True, hide_index=True)
+        monthly = st.session_state['t1_monthly']
+        st.dataframe(format_monthly_table(monthly), use_container_width=True, hide_index=True)
 
-        # Save for inspect tab
-        st.session_state['last_mask'] = mask
-        st.session_state['last_eq'] = eq_str
         st.info("👉 Switch to 'Inspect Games' to see the actual matched games.")
 
 # ============================================================
@@ -345,7 +418,15 @@ with tab2:
     min_profit = f3.number_input("Min total $", value=0.0, step=100.0, key="t2_mp")
     min_wins = f4.number_input("Min wins", value=0, min_value=0, key="t2_mw2")
 
-    if st.button("Run search", type="primary", key="t2_run"):
+    btn_col1, btn_col2 = st.columns([1, 1])
+    run_search = btn_col1.button("Run search", type="primary", key="t2_run")
+    clear_t2 = btn_col2.button("🗑️ Clear results", key="t2_clear")
+
+    if clear_t2:
+        st.session_state.pop('leaderboard', None)
+        st.rerun()
+
+    if run_search:
         with st.spinner("Ranking single columns..."):
             # Score each column individually for predictive power (proxy: |win_rate - 0.5| at median split)
             single_scores = []
@@ -464,7 +545,17 @@ with tab3:
                                   help="Uses L1 regularization to zero out unimportant features.")
     bet_threshold = c3.number_input("Bet when predicted P(W) ≥", value=0.55, min_value=0.0, max_value=1.0, step=0.01, key="t3_pt")
 
-    if st.button("Train model", type="primary", key="t3_run"):
+    btn_col1, btn_col2 = st.columns([1, 1])
+    train_clicked = btn_col1.button("Train model", type="primary", key="t3_run")
+    clear_t3 = btn_col2.button("🗑️ Clear results", key="t3_clear")
+
+    if clear_t3:
+        for k in ['t3_done', 't3_train_stats', 't3_test_stats', 't3_imp_df', 't3_eq',
+                  't3_test_mask', 't3_monthly', 't3_train_cutoff']:
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    if train_clicked:
         try:
             from sklearn.linear_model import LogisticRegression
             from sklearn.preprocessing import StandardScaler
@@ -573,7 +664,8 @@ with tab3:
 
             # Monthly breakdown for test set
             st.markdown(f"### 📅 Monthly breakdown (test set: {train_year_cutoff}+)")
-            st.dataframe(monthly_breakdown(pairs, test_mask_full), use_container_width=True, hide_index=True)
+            test_monthly = monthly_breakdown(pairs, test_mask_full)
+            st.dataframe(format_monthly_table(test_monthly), use_container_width=True, hide_index=True)
 
             # Save
             st.session_state['last_mask'] = test_mask_full
@@ -587,18 +679,143 @@ with tab4:
     if 'last_mask' not in st.session_state:
         st.info("Run a backtest in Tab 1, 2, or 3 first.")
     else:
-        st.markdown(f"**Pattern:** `{st.session_state.get('last_eq','(no description)')}`")
+        eq_label = st.session_state.get('last_eq', '(no description)')
+        st.markdown(f"**Pattern:** `{eq_label}`")
         mask = st.session_state['last_mask']
         games = pairs[mask].sort_values('date').reset_index(drop=True).copy()
+
         if len(games) == 0:
             st.warning("No matched games.")
         else:
             games['cumulative'] = games['profit'].cumsum().round(2)
             display_cols = ['date', 'team', 'home_team', 'result', 'risk', 'profit', 'cumulative', 'odds']
-            st.dataframe(games[display_cols], use_container_width=True, height=500)
+            games_display = games[display_cols].copy()
+
+            # Action buttons row
+            ac1, ac2, ac3 = st.columns([2, 2, 2])
+            save_clicked = ac1.button("⭐ Save to Favorites", key="t4_save")
+            clear_t4 = ac2.button("🗑️ Clear inspection", key="t4_clear")
+
+            if clear_t4:
+                for k in ['last_mask', 'last_eq']:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+            if save_clicked:
+                # Capture summary stats
+                stats = evaluate_mask(pairs, mask)
+                fav = {
+                    'name': eq_label[:80],
+                    'eq': eq_label,
+                    'mask': mask.copy(),
+                    'stats': stats,
+                    'games': games[display_cols].copy(),
+                    'monthly': monthly_breakdown(pairs, mask),
+                    'saved_at': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
+                }
+                st.session_state['favorites'].append(fav)
+                st.success(f"⭐ Saved! ({len(st.session_state['favorites'])} total favorites)")
+
+            # Formatted games table — date as mm/dd/yyyy, $ amounts
+            st.markdown(f"**{len(games)} matched games**")
+            st.dataframe(format_games_table(games_display), use_container_width=True, height=500, hide_index=True)
+
+            # Cumulative profit chart
             st.markdown("**Cumulative profit over time**")
             st.line_chart(games.set_index('date')['cumulative'])
+
+            # Formatted monthly breakdown
             st.markdown("**Monthly breakdown**")
-            st.dataframe(monthly_breakdown(pairs, mask), use_container_width=True, hide_index=True)
+            monthly = monthly_breakdown(pairs, mask)
+            st.dataframe(format_monthly_table(monthly), use_container_width=True, hide_index=True)
+
+            # CSV download (raw, unformatted — better for reuse in Excel etc.)
             st.download_button("📥 Download matched games CSV",
                                 games.to_csv(index=False), "matched_games.csv", "text/csv")
+
+
+# ============================================================
+# TAB 5: Saved Favorites
+# ============================================================
+with tab5:
+    st.subheader("⭐ Saved Favorites")
+    favs = st.session_state.get('favorites', [])
+
+    if not favs:
+        st.info("No favorites saved yet. From the **Inspect Games** tab, click "
+                "**⭐ Save to Favorites** on any pattern to keep it here.")
+    else:
+        st.caption(f"{len(favs)} saved pattern{'s' if len(favs) != 1 else ''}. "
+                   "Favorites persist for the current browser session only — "
+                   "use the export button below to keep a permanent copy.")
+
+        # Quick summary list of all favorites
+        summary = pd.DataFrame([{
+            '#': i,
+            'Saved At': f['saved_at'],
+            'Pattern': f['eq'][:80] + ('...' if len(f['eq']) > 80 else ''),
+            'Occurrences': f['stats']['count'],
+            'Win Rate': f"{f['stats']['win_rate']:.1%}" if pd.notna(f['stats']['win_rate']) else "—",
+            'Total $': f"${f['stats']['total_profit']:,.2f}",
+            'ROI': f"{f['stats']['roi']:.1%}" if pd.notna(f['stats']['roi']) else "—",
+        } for i, f in enumerate(favs)])
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # Pick one to view in detail
+        idx = st.number_input("Pick a favorite to view (by # above)", 0, len(favs) - 1, 0, key="t5_idx")
+        chosen = favs[idx]
+
+        c1, c2 = st.columns([3, 1])
+        c1.markdown(f"### {chosen['eq'][:120]}")
+        c1.caption(f"Saved at {chosen['saved_at']}")
+
+        if c2.button("🗑️ Delete this favorite", key="t5_del"):
+            del st.session_state['favorites'][idx]
+            st.rerun()
+
+        # Stats metric strip
+        s = chosen['stats']
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Occurrences", f"{s['count']:,}")
+        m2.metric("Win Rate", f"{s['win_rate']:.1%}" if pd.notna(s['win_rate']) else "—")
+        m3.metric("Total $", f"${s['total_profit']:,.2f}")
+        m4.metric("ROI", f"{s['roi']:.1%}" if pd.notna(s['roi']) else "—")
+        m5.metric("Lowest Pt", f"${s['lowest']:,.2f}" if pd.notna(s['lowest']) else "—")
+
+        # Games table
+        st.markdown(f"**{len(chosen['games'])} matched games**")
+        st.dataframe(format_games_table(chosen['games']), use_container_width=True, height=400, hide_index=True)
+
+        # Cumulative chart
+        st.markdown("**Cumulative profit over time**")
+        cum_data = chosen['games'].copy()
+        cum_data['date'] = pd.to_datetime(cum_data['date'])
+        cum_data = cum_data.sort_values('date')
+        # Recompute cumulative in case 'cumulative' col got reformatted as text
+        if cum_data['profit'].dtype == 'object':
+            cum_data['profit'] = cum_data['profit'].astype(str).str.replace('[$,]', '', regex=True).astype(float)
+        cum_data['cumulative'] = cum_data['profit'].cumsum()
+        st.line_chart(cum_data.set_index('date')['cumulative'])
+
+        # Monthly
+        st.markdown("**Monthly breakdown**")
+        st.dataframe(format_monthly_table(chosen['monthly']), use_container_width=True, hide_index=True)
+
+        # Export favorites
+        st.markdown("---")
+        st.markdown("### 📥 Export favorites")
+        st.caption("Download all your favorites as a single CSV. The patterns and stats are preserved; "
+                   "you can re-import context by re-running the same equation in Tab 1.")
+        export_rows = []
+        for i, f in enumerate(favs):
+            export_rows.append({
+                'fav_idx': i, 'saved_at': f['saved_at'], 'pattern': f['eq'],
+                'count': f['stats']['count'], 'wins': f['stats']['wins'], 'losses': f['stats']['losses'],
+                'win_rate': f['stats']['win_rate'], 'total_profit': f['stats']['total_profit'],
+                'roi': f['stats']['roi'], 'lowest_point': f['stats']['lowest'],
+            })
+        export_df = pd.DataFrame(export_rows)
+        st.download_button("📥 Download all favorites (summary CSV)",
+                            export_df.to_csv(index=False), "favorites_summary.csv", "text/csv")
