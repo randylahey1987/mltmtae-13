@@ -87,14 +87,17 @@ def load_data(file_bytes):
     df[df.columns[DJ_I]] = df.iloc[:, DJ_I].apply(parse_money)
     df[df.columns[DL_I]] = df.iloc[:, DL_I].apply(parse_money)
 
-    # Parse dates
-    df[df.columns[DATE_I]] = pd.to_datetime(df.iloc[:, DATE_I], errors='coerce')
-    df['_year'] = df.iloc[:, DATE_I].dt.year
-    df['_month'] = df.iloc[:, DATE_I].dt.month
+    # Parse dates: prefer CU (cleaner format per user); fall back to A if CU is missing
+    cu_dates = pd.to_datetime(df.iloc[:, CU_I], errors='coerce')
+    a_dates = pd.to_datetime(df.iloc[:, DATE_I], errors='coerce')
+    df['_date'] = cu_dates.fillna(a_dates)
+    df['_year'] = df['_date'].dt.year
+    df['_month'] = df['_date'].dt.month
 
-    # Strip text cols
-    for c in [TEAM_I, HOME_I, RESULT_I]:
-        df[df.columns[c]] = df.iloc[:, c].astype(str).str.strip()
+    # Strip text cols; uppercase result for robustness against 'w'/'W' inconsistency
+    df[df.columns[TEAM_I]] = df.iloc[:, TEAM_I].astype(str).str.strip()
+    df[df.columns[HOME_I]] = df.iloc[:, HOME_I].astype(str).str.strip()
+    df[df.columns[RESULT_I]] = df.iloc[:, RESULT_I].astype(str).str.strip().str.upper()
 
     # Build the "pairs" dataset:
     # Each output row corresponds to a comparative row N where B[N-1] == H[N].
@@ -105,18 +108,22 @@ def load_data(file_bytes):
     mask = (prev_team == df.iloc[:, HOME_I]) & (df['_year'] == prev_year)
     mask = mask.fillna(False)
 
-    # Normalize money columns: the source CSV has inconsistent sign conventions
-    # (some seasons use negative risk, some use positive). Force conventions:
-    #   risk   = always positive (the dollar amount risked)
-    #   profit = positive for W, negative for L (signed by outcome)
-    raw_risk = df.iloc[:, DJ_I].abs()
-    raw_profit_abs = df.iloc[:, DL_I].abs()
-    result_col = df.iloc[:, RESULT_I]
-    signed_profit = np.where(result_col == 'W', raw_profit_abs,
-                              np.where(result_col == 'L', -raw_profit_abs, np.nan))
+    # Money convention (per user's data spec, now cleaned):
+    #   - DJ is dollar amount risked. Always positive.
+    #   - DL is signed result. W rows are positive, L rows are negative.
+    #     Negatives in source CSV use ($1.00) format which parse_money handles.
+    raw_risk = df.iloc[:, DJ_I].abs()  # defensive .abs() in case of stragglers
+    signed_profit = df.iloc[:, DL_I]   # trust DL as-is
+
+    # Diagnostic: count any rows where DL sign disagrees with J. Should be 0
+    # on clean data. If non-zero, surface a warning so user can investigate.
+    is_w = (df.iloc[:, RESULT_I] == 'W')
+    is_l = (df.iloc[:, RESULT_I] == 'L')
+    inconsistent = ((is_w & (signed_profit < 0)) | (is_l & (signed_profit > 0))) & signed_profit.notna()
+    n_corrected = int(inconsistent.sum())
 
     pairs = pd.DataFrame()
-    pairs['date'] = df.iloc[:, DATE_I]
+    pairs['date'] = df['_date']
     pairs['team'] = df.iloc[:, TEAM_I]
     pairs['home_team'] = df.iloc[:, HOME_I]
     pairs['result'] = df.iloc[:, RESULT_I]
@@ -128,12 +135,18 @@ def load_data(file_bytes):
     pairs['valid'] = mask
 
     # Pull stats from the PREVIOUS row — build all at once via concat to avoid fragmentation
+    # Use full feature names (no truncation) and dedupe to guarantee uniqueness
     stat_names = []
     stat_data = {}
     for c in STAT_COLS:
         col_letter = idx_to_letters(c)
         col_name = df.columns[c]
-        feature_name = f"{col_letter}_{col_name}"[:60]  # avoid super long names
+        base_name = f"{col_letter}_{col_name}"
+        feature_name = base_name
+        suffix = 2
+        while feature_name in stat_data:
+            feature_name = f"{base_name}_{suffix}"
+            suffix += 1
         stat_data[feature_name] = df.iloc[:, c].shift(1)
         stat_names.append(feature_name)
     stat_df = pd.DataFrame(stat_data, index=df.index)
@@ -143,7 +156,7 @@ def load_data(file_bytes):
     pairs = pairs[pairs['valid']].drop(columns='valid').reset_index(drop=True)
     pairs = pairs[pairs['result'].isin(['W', 'L'])].reset_index(drop=True)
 
-    return pairs, stat_names
+    return pairs, stat_names, n_corrected
 
 
 def evaluate_mask(pairs, mask):
@@ -266,10 +279,19 @@ if uploaded is None:
 # Load
 with st.spinner("Loading and pairing rows..."):
     try:
-        pairs, stat_names = load_data(uploaded.getvalue())
+        pairs, stat_names, n_corrected = load_data(uploaded.getvalue())
     except Exception as e:
         st.error(f"Failed to load: {e}")
         st.stop()
+
+# Diagnostic warning if the CSV has any sign inconsistencies (should be 0 on clean data)
+if n_corrected > 0:
+    st.warning(
+        f"⚠️ Found **{n_corrected}** row(s) where DL's sign disagrees with J (W/L). "
+        f"On clean data this should be 0 — these rows likely have data entry issues "
+        f"in your source CSV. The app uses DL as-is, so totals may be skewed for these rows. "
+        f"Worth investigating in your spreadsheet."
+    )
 
 _wins = int((pairs['result']=='W').sum())
 _losses = int((pairs['result']=='L').sum())
@@ -394,7 +416,20 @@ def reconstruct_fav_mask(fav, pairs, stat_names):
 # ============================================================
 with tab1:
     st.subheader("Build a custom equation: pick columns, multipliers, and threshold")
-    st.caption("Builds: `c1*m1 + c2*m2 + ... > threshold`. Multipliers default to 1 (raw averages).")
+    st.markdown(
+        """
+        <div style="font-size: 0.85em; opacity: 0.85; margin-bottom: 8px;">
+        <b>How this works:</b> The app computes <code>col1×mult1 + col2×mult2 + ... [operator] threshold</code> for every game,
+        then backtests the games that match.<br>
+        <b>Example:</b> if you pick <code>BB_barrels</code> with multiplier <code>1.0</code>, operator <code>&gt;</code>,
+        threshold <code>2.5</code>, the app finds all games where the previous game's barrels stat was greater than 2.5.<br>
+        <b>Tip:</b> Threshold should match the typical scale of your inputs. If your formula is
+        <code>2*HomeScore + 1.3*AvgPitches</code>, your scores will be 100+ and a threshold of 1.5 will match every game.
+        Use a threshold near the median of what the equation actually produces.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     n_cols = st.slider("Number of columns to combine", 1, 8, 3, key="t1_n")
 
@@ -407,6 +442,21 @@ with tab1:
         col_keys.append((choice, mult))
 
     operator = st.selectbox("Operator", [">", ">=", "<", "<=", "between"], key="t1_op")
+
+    # Auto-suggest a threshold near the median of the current formula
+    try:
+        _preview_score = np.zeros(len(pairs))
+        for col, m in col_keys:
+            _preview_score = _preview_score + pairs[col].fillna(0) * m
+        _med = float(np.nanmedian(_preview_score))
+        _q25 = float(np.nanquantile(_preview_score, 0.25))
+        _q75 = float(np.nanquantile(_preview_score, 0.75))
+        st.caption(
+            f"💡 Your current equation produces values around **median {_med:.2f}** "
+            f"(25th: {_q25:.2f}, 75th: {_q75:.2f}). Pick a threshold near these for ~50% match rate."
+        )
+    except Exception:
+        pass
 
     if operator == "between":
         c1, c2 = st.columns(2)
@@ -426,7 +476,9 @@ with tab1:
         current_fingerprint = (n_cols, tuple(col_keys), operator, thresh)
 
     if clear_clicked:
-        for k in ['t1_stats', 't1_mask', 't1_eq', 't1_monthly', 't1_fingerprint']:
+        for k in ['t1_stats', 't1_mask', 't1_eq', 't1_monthly', 't1_fingerprint',
+                  't1_col_keys', 't1_operator', 't1_thresh',
+                  'last_mask', 'last_eq', 'last_structured']:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -541,7 +593,8 @@ with tab2:
     clear_t2 = btn_col2.button("🗑️ Clear results", key="t2_clear")
 
     if clear_t2:
-        st.session_state.pop('leaderboard', None)
+        for k in ['leaderboard', 'last_mask', 'last_eq', 'last_structured']:
+            st.session_state.pop(k, None)
         st.rerun()
 
     if run_search:
@@ -672,8 +725,7 @@ with tab3:
     clear_t3 = btn_col2.button("🗑️ Clear results", key="t3_clear")
 
     if clear_t3:
-        for k in ['t3_done', 't3_train_stats', 't3_test_stats', 't3_imp_df', 't3_eq',
-                  't3_test_mask', 't3_monthly', 't3_train_cutoff']:
+        for k in ['last_mask', 'last_eq', 'last_structured']:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -696,7 +748,6 @@ with tab3:
             X_train_full = train[stat_names].fillna(train[stat_names].median())
             X_test_full = test[stat_names].fillna(train[stat_names].median())
             y_train = (train['result'] == 'W').astype(int)
-            y_test = (test['result'] == 'W').astype(int)
 
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train_full)
@@ -820,7 +871,7 @@ with tab4:
             clear_t4 = ac2.button("🗑️ Clear inspection", key="t4_clear")
 
             if clear_t4:
-                for k in ['last_mask', 'last_eq']:
+                for k in ['last_mask', 'last_eq', 'last_structured']:
                     st.session_state.pop(k, None)
                 st.rerun()
 
@@ -915,30 +966,52 @@ with tab5:
         st.caption(f"{len(favs)} saved pattern{'s' if len(favs) != 1 else ''}. "
                    "Auto-saved to disk; use the backup section above for cross-deploy safety.")
 
-        # Quick summary list of all favorites
+        # Helpers used by both the row list and the detail view below
         def _safe_pct(v):
-            try: return f"{float(v):.1%}" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—"
-            except: return "—"
+            try:
+                return f"{float(v):.1%}" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—"
+            except Exception:
+                return "—"
 
         def _safe_money(v):
             try:
                 v = float(v)
-                if pd.isna(v): return "—"
+                if pd.isna(v):
+                    return "—"
                 return f"-${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
-            except: return "—"
+            except Exception:
+                return "—"
 
-        summary = pd.DataFrame([{
-            '#': i,
-            'Saved At': f.get('saved_at', ''),
-            'Pattern': (f.get('eq', '') or '')[:80] + ('...' if len(f.get('eq', '') or '') > 80 else ''),
-            'Occurrences': f.get('stats', {}).get('count', '—'),
-            'Wins': f.get('stats', {}).get('wins', '—'),
-            'Losses': f.get('stats', {}).get('losses', '—'),
-            'Win Rate': _safe_pct(f.get('stats', {}).get('win_rate')),
-            'Total $': _safe_money(f.get('stats', {}).get('total_profit')),
-            'ROI': _safe_pct(f.get('stats', {}).get('roi')),
-        } for i, f in enumerate(favs)])
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.markdown("**All saved favorites** — click 🗑️ next to any row to delete it.")
+
+        # Header row
+        hdr = st.columns([0.5, 1.5, 4, 1, 1, 1, 1, 1, 0.7])
+        for col, label in zip(hdr, ['#', 'Saved', 'Pattern', 'Count', 'Wins', 'Losses', 'WR', 'ROI', '']):
+            col.markdown(f"<small><b>{label}</b></small>", unsafe_allow_html=True)
+
+        # One row per favorite with inline delete button
+        delete_idx = None
+        for i, f in enumerate(favs):
+            row_cols = st.columns([0.5, 1.5, 4, 1, 1, 1, 1, 1, 0.7])
+            row_cols[0].markdown(f"<small>{i}</small>", unsafe_allow_html=True)
+            row_cols[1].markdown(f"<small>{f.get('saved_at', '')}</small>", unsafe_allow_html=True)
+            pattern_text = (f.get('eq', '') or '')
+            if len(pattern_text) > 60:
+                pattern_text = pattern_text[:60] + '…'
+            row_cols[2].markdown(f"<small>{pattern_text}</small>", unsafe_allow_html=True)
+            stats_d = f.get('stats', {}) or {}
+            row_cols[3].markdown(f"<small>{stats_d.get('count', '—')}</small>", unsafe_allow_html=True)
+            row_cols[4].markdown(f"<small>{stats_d.get('wins', '—')}</small>", unsafe_allow_html=True)
+            row_cols[5].markdown(f"<small>{stats_d.get('losses', '—')}</small>", unsafe_allow_html=True)
+            row_cols[6].markdown(f"<small>{_safe_pct(stats_d.get('win_rate'))}</small>", unsafe_allow_html=True)
+            row_cols[7].markdown(f"<small>{_safe_pct(stats_d.get('roi'))}</small>", unsafe_allow_html=True)
+            if row_cols[8].button("🗑️", key=f"t5_del_{i}", help="Delete this favorite"):
+                delete_idx = i
+
+        if delete_idx is not None:
+            del st.session_state['favorites'][delete_idx]
+            save_favorites_to_disk()
+            st.rerun()
 
         st.markdown("---")
 
