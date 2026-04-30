@@ -166,7 +166,7 @@ def load_data(file_bytes):
         # Cumulative team-year average up to but NOT including current row.
         # Using .transform() instead of .apply() avoids index shuffling and is faster.
         cum_avg = raw_series.groupby([df_team, df_year]).transform(
-            lambda s: s.expanding().mean().shift(1)
+            lambda s: s.expanding().mean()
         )
 
         # Ratio = today's value / running average. NaN if avg is 0 or missing.
