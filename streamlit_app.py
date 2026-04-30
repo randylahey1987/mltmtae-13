@@ -420,7 +420,7 @@ with st.sidebar:
         key="mode_selector",
         help=(
             "**Raw** = previous game's literal value (e.g., 8 runs).\n\n"
-            "**Avg** = team's cumulative season average BEFORE the previous game "
+            "**Avg** = team's cumulative season average up until comparative game "
             "(matches your AVERAGEIFS formula).\n\n"
             "**Ratio** = previous game's value ÷ running team-season average. "
             "1.0 = at average, 2.0 = double team's typical pace. "
@@ -456,7 +456,7 @@ pairs = pairs_by_mode[mode_key]
 # Display the current mode prominently so the user knows what they're seeing
 mode_descriptions = {
     'raw':   "🔢 **Raw mode** — using previous game's literal stat values.",
-    'avg':   "📈 **Avg mode** — using team's cumulative season average up to the previous game.",
+    'avg':   "📈 **Avg mode** — using team's cumulative season average up to the comparative game.",
     'ratio': "⚖️ **Ratio mode** — using (prev value) ÷ (running team-season average). 1.0 = at average.",
 }
 st.info(mode_descriptions[mode_key])
