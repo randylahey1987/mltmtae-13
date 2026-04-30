@@ -624,17 +624,48 @@ with tab1:
 
     operator = st.selectbox("Operator", [">", ">=", "<", "<=", "between"], key="t1_op")
 
-    # Auto-suggest a threshold near the median of the current formula
+    # Auto-preview the current equation and suggest threshold ranges
     try:
         _preview_score = np.zeros(len(pairs))
+        _eq_parts_preview = []
+
         for col, m in col_keys:
             _preview_score = _preview_score + pairs[col].fillna(0) * m
+            _eq_parts_preview.append(f"{m:.3f} × {col}")
+
         _med = float(np.nanmedian(_preview_score))
         _q25 = float(np.nanquantile(_preview_score, 0.25))
         _q75 = float(np.nanquantile(_preview_score, 0.75))
-        st.caption(
-            f"💡 Your current equation produces values around **median {_med:.2f}** "
-            f"(25th: {_q25:.2f}, 75th: {_q75:.2f}). Pick a threshold near these for ~50% match rate."
+
+        _eq_preview = " + ".join(_eq_parts_preview) + " = score"
+
+        st.markdown(
+            f"""
+            <div style="
+                background-color: #ffffff;
+                border: 2px solid #2ecc71;
+                border-radius: 8px;
+                padding: 10px 14px;
+                margin: 10px 0;
+                color: #000000;
+                line-height: 1.5;
+            ">
+                <div style="margin: 7px 0;"><strong>Current equation:</strong></div>
+                <div style="margin: 7px 0;"><code>{_eq_preview}</code></div>
+                <div style="margin: 7px 0;">
+                    <strong>Score range:</strong>
+                    25th = {_q25:.2f} &nbsp; | &nbsp;
+                    Median = {_med:.2f} &nbsp; | &nbsp;
+                    75th = {_q75:.2f}
+                </div>
+                <div style="margin: 7px 0;">
+                    Pick a threshold near the median for about a 50% match rate.
+                    Higher threshold = fewer, more selective matches.
+                    Lower threshold = more matches.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
     except Exception:
         pass
