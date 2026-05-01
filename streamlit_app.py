@@ -166,7 +166,7 @@ def load_data(file_bytes):
         # Cumulative team-year average up to but NOT including current row.
         # Using .transform() instead of .apply() avoids index shuffling and is faster.
         cum_avg = raw_series.groupby([df_team, df_year]).transform(
-            lambda s: s.expanding().mean()
+            lambda s: s.expanding().mean().shift(1)
         )
 
         # Ratio = today's value / running average. NaN if avg is 0 or missing.
@@ -420,7 +420,7 @@ with st.sidebar:
         key="mode_selector",
         help=(
             "**Raw** = previous game's literal value (e.g., 8 runs).\n\n"
-            "**Avg** = team's cumulative season average up until comparative game "
+            "**Avg** = team's cumulative season average BEFORE the previous game "
             "(matches your AVERAGEIFS formula).\n\n"
             "**Ratio** = previous game's value ÷ running team-season average. "
             "1.0 = at average, 2.0 = double team's typical pace. "
@@ -456,7 +456,7 @@ pairs = pairs_by_mode[mode_key]
 # Display the current mode prominently so the user knows what they're seeing
 mode_descriptions = {
     'raw':   "🔢 **Raw mode** — using previous game's literal stat values.",
-    'avg':   "📈 **Avg mode** — using team's cumulative season average up to the comparative game.",
+    'avg':   "📈 **Avg mode** — using team's cumulative season average up to the previous game.",
     'ratio': "⚖️ **Ratio mode** — using (prev value) ÷ (running team-season average). 1.0 = at average.",
 }
 st.info(mode_descriptions[mode_key])
@@ -624,94 +624,18 @@ with tab1:
 
     operator = st.selectbox("Operator", [">", ">=", "<", "<=", "between"], key="t1_op")
 
-    # Auto-preview the current equation and score distribution
+    # Auto-suggest a threshold near the median of the current formula
     try:
         _preview_score = np.zeros(len(pairs))
-        _eq_parts_preview = []
-
         for col, m in col_keys:
             _preview_score = _preview_score + pairs[col].fillna(0) * m
-            _eq_parts_preview.append(f"{m:.3f}*{col}")
-
-        _q01 = float(np.nanquantile(_preview_score, 0.01))
-        _q02 = float(np.nanquantile(_preview_score, 0.02))
-        _q05 = float(np.nanquantile(_preview_score, 0.05))
-        _q10 = float(np.nanquantile(_preview_score, 0.10))
-        _q25 = float(np.nanquantile(_preview_score, 0.25))
         _med = float(np.nanmedian(_preview_score))
+        _q25 = float(np.nanquantile(_preview_score, 0.25))
         _q75 = float(np.nanquantile(_preview_score, 0.75))
-        _q90 = float(np.nanquantile(_preview_score, 0.90))
-        _q95 = float(np.nanquantile(_preview_score, 0.95))
-        _q99 = float(np.nanquantile(_preview_score, 0.99))
-        _min = float(np.nanmin(_preview_score))
-        _max = float(np.nanmax(_preview_score))
-
-        _eq_preview = " + ".join(_eq_parts_preview)
-
-        st.markdown(
-            f"""
-            <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; margin-bottom: 9px;">
-                <strong>Current equation:</strong>
-                <code>{_eq_preview} = score</code>
-            </div>
-            """,
-            unsafe_allow_html=True
+        st.caption(
+            f"💡 Your current equation produces values around **median {_med:.2f}** "
+            f"(25th: {_q25:.2f}, 75th: {_q75:.2f}). Pick a threshold near these for ~50% match rate."
         )
-
-        low_col, mid_col, high_col = st.columns(3)
-
-        with low_col:
-            st.markdown(
-                f"""
-                <div style="font-size: 13px; line-height: 1.4;">
-                    <strong>Bottom / low thresholds</strong><br>
-                    Min: {_min:,.2f}<br>
-                    1st: {_q01:,.2f}<br>
-                    2nd: {_q02:,.2f}<br>
-                    5th: {_q05:,.2f}<br>
-                    10th: {_q10:,.2f}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        with mid_col:
-            st.markdown(
-                f"""
-                <div style="font-size: 13px; line-height: 1.4;">
-                    <strong>Middle range</strong><br>
-                    25th: {_q25:,.2f}<br>
-                    50th: {_med:,.2f}<br>
-                    75th: {_q75:,.2f}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        with high_col:
-            st.markdown(
-                f"""
-                <div style="font-size: 13px; line-height: 1.4;">
-                    <strong>Top / high thresholds</strong><br>
-                    90th: {_q90:,.2f}<br>
-                    95th: {_q95:,.2f}<br>
-                    99th: {_q99:,.2f}<br>
-                    Max: {_max:,.2f}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        st.markdown(
-            """
-            <div style="font-size: 12px; line-height: 1.4; opacity: 0.75; margin-top: 7px; margin-bottom: 12px;">
-                Use these values as threshold guides. Using <code>&gt;</code> near the 90th percentile tests roughly the top 10% of scores.
-                Using <code>&lt;</code> near the 10th percentile tests roughly the bottom 10% of scores.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
     except Exception:
         pass
 
@@ -835,13 +759,22 @@ with tab2:
     n_thresholds = c1.slider("Threshold values to test per column", 3, 11, 5, key="t2_t",
                               help="More = finer search, slower. Tests evenly-spaced quantiles.")
     operator_choice = c2.multiselect("Operators", [">", "<"], default=[">", "<"], key="t2_op")
+    st.caption(
+        "💡 Selecting both `>` and `<` tests every mix per combination — e.g. "
+        "`>>>`, `>><`, `><>`, `<<<`, etc. Each column gets its own operator/threshold per pattern."
+    )
 
-    # Estimate combination count and warn
+    # Estimate combination count and warn — this matches what the search will
+    # actually evaluate (after deducting same-column combos like "Score>5 AND Score<10")
     if operator_choice:
-        atoms_est = top_n * n_thresholds * len(operator_choice)
+        n_ops = len(operator_choice)
+        n_thresh_per_col = n_thresholds      # we'll later filter cols with too few values, but this is the upper bound
+        atoms_per_col = n_ops * n_thresh_per_col
         from math import comb
         try:
-            combos_est = comb(atoms_est, n_combo)
+            # Total = (combos picking n_combo distinct cols from top_n) × (atoms_per_col ^ n_combo)
+            #   This counts only combos with all distinct columns, matching the actual search.
+            combos_est = comb(top_n, n_combo) * (atoms_per_col ** n_combo)
         except Exception:
             combos_est = 0
         if combos_est > 200_000:
@@ -1222,9 +1155,13 @@ with tab4:
             st.dataframe(format_monthly_table(monthly), use_container_width=True, hide_index=True)
 
             # Yearly breakdown — critical for spotting overfit patterns
-            st.markdown("**Yearly breakdown** — does this pattern work consistently across seasons?")
             yearly = yearly_breakdown(active_pairs, mask)
-            st.dataframe(format_yearly_table(yearly), use_container_width=True, hide_index=True)
+            if yearly is not None and not yearly.empty:
+                st.markdown("**Yearly breakdown** — does this pattern work consistently across seasons?")
+                consistency = yearly.attrs.get('consistency', '')
+                if consistency:
+                    st.caption(f"📅 {consistency}")
+                st.dataframe(format_yearly_table(yearly), use_container_width=True, hide_index=True)
 
             # CSV download (raw, unformatted — better for reuse in Excel etc.)
             st.download_button("📥 Download matched games CSV",
