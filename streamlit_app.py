@@ -650,7 +650,7 @@ with tab1:
 
         st.markdown(
             f"""
-            <div style="font-size: 12px; line-height: 1.35; margin-top: 4px; margin-bottom: 7px;">
+            <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; margin-bottom: 7px;">
                 <strong>Current equation:</strong>
                 <code>{_eq_preview} = score</code>
             </div>
