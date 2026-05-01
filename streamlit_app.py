@@ -650,7 +650,7 @@ with tab1:
 
         st.markdown(
             f"""
-            <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; margin-bottom: 7px;">
+            <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; margin-bottom: 9px;">
                 <strong>Current equation:</strong>
                 <code>{_eq_preview} = score</code>
             </div>
@@ -704,7 +704,7 @@ with tab1:
 
         st.markdown(
             """
-            <div style="font-size: 12px; line-height: 1.4; opacity: 0.75; margin-top: 7px; margin-bottom: 7px;">
+            <div style="font-size: 12px; line-height: 1.4; opacity: 0.75; margin-top: 7px; margin-bottom: 12px;">
                 Use these values as threshold guides. Using <code>&gt;</code> near the 90th percentile tests roughly the top 10% of scores.
                 Using <code>&lt;</code> near the 10th percentile tests roughly the bottom 10% of scores.
             </div>
