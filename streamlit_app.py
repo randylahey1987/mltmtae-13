@@ -624,7 +624,7 @@ with tab1:
 
     operator = st.selectbox("Operator", [">", ">=", "<", "<=", "between"], key="t1_op")
 
-    # Auto-preview the current equation and suggest threshold ranges
+    # Auto-preview the current equation and score distribution
     try:
         _preview_score = np.zeros(len(pairs))
         _eq_parts_preview = []
@@ -633,16 +633,56 @@ with tab1:
             _preview_score = _preview_score + pairs[col].fillna(0) * m
             _eq_parts_preview.append(f"{m:.3f}*{col}")
 
-        _med = float(np.nanmedian(_preview_score))
+        _q01 = float(np.nanquantile(_preview_score, 0.01))
+        _q02 = float(np.nanquantile(_preview_score, 0.02))
+        _q05 = float(np.nanquantile(_preview_score, 0.05))
+        _q10 = float(np.nanquantile(_preview_score, 0.10))
         _q25 = float(np.nanquantile(_preview_score, 0.25))
+        _med = float(np.nanmedian(_preview_score))
         _q75 = float(np.nanquantile(_preview_score, 0.75))
+        _q90 = float(np.nanquantile(_preview_score, 0.90))
+        _q95 = float(np.nanquantile(_preview_score, 0.95))
+        _q99 = float(np.nanquantile(_preview_score, 0.99))
+        _min = float(np.nanmin(_preview_score))
+        _max = float(np.nanmax(_preview_score))
 
-        _eq_preview = " + ".join(_eq_parts_preview) + " = score"
+        _eq_preview = " + ".join(_eq_parts_preview)
 
-        st.write(f"Current equation: `{_eq_preview}`")
+        st.write(f"Current equation: `{_eq_preview} = score`")
+
+        low_col, mid_col, high_col = st.columns(3)
+
+        with low_col:
+            st.markdown("**Bottom / low thresholds**")
+            st.text(
+                f"Min:  {_min:,.2f}\n"
+                f"1st:  {_q01:,.2f}\n"
+                f"2nd:  {_q02:,.2f}\n"
+                f"5th:  {_q05:,.2f}\n"
+                f"10th: {_q10:,.2f}"
+            )
+
+        with mid_col:
+            st.markdown("**Middle range**")
+            st.text(
+                f"25th: {_q25:,.2f}\n"
+                f"50th: {_med:,.2f}\n"
+                f"75th: {_q75:,.2f}"
+            )
+
+        with high_col:
+            st.markdown("**Top / high thresholds**")
+            st.text(
+                f"90th: {_q90:,.2f}\n"
+                f"95th: {_q95:,.2f}\n"
+                f"99th: {_q99:,.2f}\n"
+                f"Max:  {_max:,.2f}"
+            )
+
         st.caption(
-            f"💡 Score values: 25th = {_q25:.2f}, median = {_med:.2f}, 75th = {_q75:.2f}. "
-            f"Pick a threshold near the median for ~50% match rate."
+            "Use these values as threshold guides. "
+            "For example, using `>` near the 90th percentile tests roughly the top 10% of scores. "
+            "Using `<` near the 10th percentile tests roughly the bottom 10% of scores."
         )
 
     except Exception:
