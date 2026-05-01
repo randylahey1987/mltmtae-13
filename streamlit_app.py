@@ -648,41 +648,68 @@ with tab1:
 
         _eq_preview = " + ".join(_eq_parts_preview)
 
-        st.write(f"Current equation: `{_eq_preview} = score`")
+        st.markdown(
+            f"""
+            <div style="font-size: 12px; line-height: 1.35; margin-top: 4px; margin-bottom: 4px;">
+                <strong>Current equation:</strong>
+                <code>{_eq_preview} = score</code>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         low_col, mid_col, high_col = st.columns(3)
 
         with low_col:
-            st.markdown("**Bottom / low thresholds**")
-            st.text(
-                f"Min:  {_min:,.2f}\n"
-                f"1st:  {_q01:,.2f}\n"
-                f"2nd:  {_q02:,.2f}\n"
-                f"5th:  {_q05:,.2f}\n"
-                f"10th: {_q10:,.2f}"
+            st.markdown(
+                f"""
+                <div style="font-size: 12px; line-height: 1.35;">
+                    <strong>Bottom / low thresholds</strong><br>
+                    Min: {_min:,.2f}<br>
+                    1st: {_q01:,.2f}<br>
+                    2nd: {_q02:,.2f}<br>
+                    5th: {_q05:,.2f}<br>
+                    10th: {_q10:,.2f}
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
         with mid_col:
-            st.markdown("**Middle range**")
-            st.text(
-                f"25th: {_q25:,.2f}\n"
-                f"50th: {_med:,.2f}\n"
-                f"75th: {_q75:,.2f}"
+            st.markdown(
+                f"""
+                <div style="font-size: 12px; line-height: 1.35;">
+                    <strong>Middle range</strong><br>
+                    25th: {_q25:,.2f}<br>
+                    50th: {_med:,.2f}<br>
+                    75th: {_q75:,.2f}
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
         with high_col:
-            st.markdown("**Top / high thresholds**")
-            st.text(
-                f"90th: {_q90:,.2f}\n"
-                f"95th: {_q95:,.2f}\n"
-                f"99th: {_q99:,.2f}\n"
-                f"Max:  {_max:,.2f}"
+            st.markdown(
+                f"""
+                <div style="font-size: 12px; line-height: 1.35;">
+                    <strong>Top / high thresholds</strong><br>
+                    90th: {_q90:,.2f}<br>
+                    95th: {_q95:,.2f}<br>
+                    99th: {_q99:,.2f}<br>
+                    Max: {_max:,.2f}
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
-        st.caption(
-            "Use these values as threshold guides. "
-            "For example, using `>` near the 90th percentile tests roughly the top 10% of scores. "
-            "Using `<` near the 10th percentile tests roughly the bottom 10% of scores."
+        st.markdown(
+            """
+            <div style="font-size: 11px; line-height: 1.35; opacity: 0.75; margin-top: 4px;">
+                Use these values as threshold guides. Using <code>&gt;</code> near the 90th percentile tests roughly the top 10% of scores.
+                Using <code>&lt;</code> near the 10th percentile tests roughly the bottom 10% of scores.
+            </div>
+            """,
+            unsafe_allow_html=True
         )
 
     except Exception:
