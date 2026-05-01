@@ -663,7 +663,7 @@ with tab1:
         with low_col:
             st.markdown(
                 f"""
-                <div style="font-size: 12px; line-height: 1.35;">
+                <div style="font-size: 13px; line-height: 1.4;">
                     <strong>Bottom / low thresholds</strong><br>
                     Min: {_min:,.2f}<br>
                     1st: {_q01:,.2f}<br>
@@ -678,7 +678,7 @@ with tab1:
         with mid_col:
             st.markdown(
                 f"""
-                <div style="font-size: 12px; line-height: 1.35;">
+                <div style="font-size: 13px; line-height: 1.4;">
                     <strong>Middle range</strong><br>
                     25th: {_q25:,.2f}<br>
                     50th: {_med:,.2f}<br>
@@ -691,7 +691,7 @@ with tab1:
         with high_col:
             st.markdown(
                 f"""
-                <div style="font-size: 12px; line-height: 1.35;">
+                <div style="font-size: 13px; line-height: 1.4;">
                     <strong>Top / high thresholds</strong><br>
                     90th: {_q90:,.2f}<br>
                     95th: {_q95:,.2f}<br>
@@ -704,7 +704,7 @@ with tab1:
 
         st.markdown(
             """
-            <div style="font-size: 11px; line-height: 1.35; opacity: 0.75; margin-top: 4px;">
+            <div style="font-size: 12px; line-height: 1.4; opacity: 0.75; margin-top: 7px;">
                 Use these values as threshold guides. Using <code>&gt;</code> near the 90th percentile tests roughly the top 10% of scores.
                 Using <code>&lt;</code> near the 10th percentile tests roughly the bottom 10% of scores.
             </div>
