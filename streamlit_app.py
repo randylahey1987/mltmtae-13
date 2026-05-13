@@ -1,5 +1,5 @@
 """
-MLB Pattern Search & Auto-Multiplier App1
+MLB Pattern Search & Auto-Multiplier App
 Run locally: streamlit run app.py
 Deploy: push to GitHub, connect to share.streamlit.io
 
@@ -601,7 +601,7 @@ def format_games_table(games_df):
 # ============================================================
 # UI
 # ============================================================
-st.title("⚾ MLB Pattern Search & Auto-Multiplier")
+st.title("⚾ MLB Pattern Search & Auto-Multiplier1")
 st.caption("Multi-market pattern miner — predict Moneyline, Totals, or Runline outcomes.")
 
 with st.sidebar:
