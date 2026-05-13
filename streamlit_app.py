@@ -598,10 +598,58 @@ def format_games_table(games_df):
     return formatted
 
 
+def cumulative_profit_chart(dates, cumulative_values):
+    """Render a cumulative-profit line chart with $ formatting on the y-axis
+    and a zero baseline. Uses Plotly so we get proper tick formatting and
+    a hover tooltip showing both date and dollar value."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        # Fallback to Streamlit's basic chart if plotly somehow isn't available
+        st.line_chart(pd.Series(list(cumulative_values), index=list(dates)))
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=list(dates),
+        y=list(cumulative_values),
+        mode='lines',
+        line=dict(color='#00D9D9', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(0, 217, 217, 0.08)',
+        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Cumulative: $%{y:,.2f}<extra></extra>',
+        name='Cumulative profit',
+    ))
+    # Zero baseline for context
+    fig.add_hline(y=0, line=dict(color='rgba(255,255,255,0.25)', width=1, dash='dot'))
+
+    fig.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#FAFAFA', size=12),
+        hovermode='x unified',
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.05)',
+            tickfont=dict(size=11),
+        ),
+        yaxis=dict(
+            tickprefix='$',
+            tickformat=',.0f',
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.05)',
+            tickfont=dict(size=11),
+        ),
+    )
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+
 # ============================================================
 # UI
 # ============================================================
-st.title("⚾ MLB Pattern Search & Auto-Multiplier1")
+st.title("⚾ MLB Pattern Search & Auto-Multiplier")
 st.caption("Multi-market pattern miner — predict Moneyline, Totals, or Runline outcomes.")
 
 with st.sidebar:
@@ -745,7 +793,7 @@ st.markdown(
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Test One Pattern",
     "🔍 Threshold Brute-Force",
-    "🧠 Auto-Multiplier (ML)",
+    "🧠 Auto-Multiplier",
     "📋 Inspect Games",
     "⭐ Saved Favorites",
 ])
@@ -1219,6 +1267,31 @@ with tab2:
             progress = st.progress(0.0)
             chunk = max(1, len(combos_list) // 100)
 
+            # Pre-extract a small frame for fast yearly stats on accepted patterns only
+            # (we only run this AFTER a combo passes filters, so it doesn't slow down
+            # the brute-force loop itself)
+            year_series = pairs['year']
+            result_col = pairs['result']
+            profit_col = pairs['profit']
+
+            def _yearly_stats_for_mask(m):
+                """Quick yearly summary for an accepted pattern's mask.
+                Returns (years_profitable, total_years, worst_year_profit, best_year_profit)."""
+                sub = pd.DataFrame({
+                    'year': year_series[m],
+                    'result': result_col[m],
+                    'profit': profit_col[m].fillna(0),
+                })
+                if sub.empty:
+                    return 0, 0, 0.0, 0.0
+                # Sum profit per year (pushes have profit=0 already)
+                year_profits = sub.groupby('year')['profit'].sum()
+                if year_profits.empty:
+                    return 0, 0, 0.0, 0.0
+                profitable = int((year_profits > 0).sum())
+                total = int(len(year_profits))
+                return profitable, total, float(year_profits.min()), float(year_profits.max())
+
             for i, combo in enumerate(combos_list):
                 if i % chunk == 0:
                     progress.progress(min(1.0, i / max(1, len(combos_list))))
@@ -1237,8 +1310,20 @@ with tab2:
                 if pd.notna(stats['roi']) and stats['roi'] < min_roi: continue
                 if pd.notna(stats['lowest']) and stats['lowest'] < min_lowest: continue
 
+                # Only compute yearly consistency for patterns that PASS filters —
+                # keeps the brute-force loop fast (no work on rejected combos)
+                yrs_prof, yrs_total, worst_yr, best_yr = _yearly_stats_for_mask(cmask)
+
                 desc = " AND ".join([f"{c}{op}{t}" for c, op, t in combo])
-                results.append({'pattern': desc, **stats, '_combo': combo})
+                results.append({
+                    'pattern': desc,
+                    **stats,
+                    'yrs_profitable': yrs_prof,
+                    'yrs_total': yrs_total,
+                    'worst_year': round(worst_yr, 2),
+                    'best_year': round(best_yr, 2),
+                    '_combo': combo,
+                })
 
             progress.progress(1.0)
 
@@ -1258,17 +1343,49 @@ with tab2:
 
     if 'leaderboard' in st.session_state:
         lb = st.session_state['leaderboard']
-        sort_col = st.selectbox("Sort by", ['total_profit', 'roi', 'target_rate', 'count'], key="t2_sort")
+        st.markdown("**Leaderboard** — yearly consistency columns help spot non-overfit patterns. "
+                    "Sort by `yrs_profitable` to find patterns that worked across every season.")
+        sort_col = st.selectbox(
+            "Sort by",
+            ['total_profit', 'roi', 'target_rate', 'count',
+             'yrs_profitable', 'worst_year', 'best_year'],
+            key="t2_sort",
+        )
         ascending = st.checkbox("Ascending (worst first — useful for fades)", value=False, key="t2_asc")
         display = lb.drop(columns='_combo').sort_values(sort_col, ascending=ascending).head(100).copy()
+
+        # Combine yrs_profitable + yrs_total into a single "Yrs Prof" column (e.g. "4/4")
+        if 'yrs_profitable' in display.columns and 'yrs_total' in display.columns:
+            display['Yrs Prof'] = display.apply(
+                lambda r: f"{int(r['yrs_profitable'])}/{int(r['yrs_total'])}"
+                          if pd.notna(r.get('yrs_total')) and r.get('yrs_total', 0) > 0 else "—",
+                axis=1,
+            )
+            display = display.drop(columns=['yrs_profitable', 'yrs_total'])
+
         # Drop pushes column for ML/RL where it's always 0
         if 'pushes' in display.columns and not push_val:
             display = display.drop(columns='pushes')
+
+        # Format money + percentages
         display['target_rate'] = display['target_rate'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
         display['roi'] = display['roi'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
         display['total_profit'] = display['total_profit'].apply(_fmt_money)
         display['avg_profit'] = display['avg_profit'].apply(_fmt_money)
         display['lowest'] = display['lowest'].apply(_fmt_money)
+        if 'worst_year' in display.columns:
+            display['worst_year'] = display['worst_year'].apply(_fmt_money)
+        if 'best_year' in display.columns:
+            display['best_year'] = display['best_year'].apply(_fmt_money)
+
+        # Reorder columns: pattern first, then key stats, then yearly consistency, then rest
+        preferred = ['pattern', 'count', 'target', 'other']
+        if 'pushes' in display.columns: preferred.append('pushes')
+        preferred += ['target_rate', 'total_profit', 'roi', 'lowest',
+                       'Yrs Prof', 'worst_year', 'best_year', 'avg_profit']
+        cols_in_order = [c for c in preferred if c in display.columns] + \
+                         [c for c in display.columns if c not in preferred]
+        display = display[cols_in_order]
         st.dataframe(display, use_container_width=True, height=600)
 
         st.download_button("📥 Download leaderboard CSV",
@@ -1330,9 +1447,10 @@ with tab2:
 # TAB 3: Auto-Multiplier (ML)
 # ============================================================
 with tab3:
-    st.subheader("Auto-Multiplier — find optimal weights mathematically")
-    st.caption(f"Predicting **{bet_type}** target **{target}**. "
-               "For Totals: predicts target side vs the other side; pushes are excluded from training.")
+    st.subheader("Auto-Multiplier — Machine Learning")
+    st.caption(f"L1-regularized logistic regression finds the optimal weights to predict "
+               f"**{bet_type}** target **{target}**. For Totals: predicts target side vs the other side; "
+               f"pushes are excluded from training.")
 
     # Determine valid year cutoffs
     pool = pairs[prior_mask].copy()
@@ -1593,7 +1711,7 @@ with tab4:
                           use_container_width=True, height=500, hide_index=True)
 
             st.markdown("**Cumulative profit over time**")
-            st.line_chart(games.set_index('date')['cumulative'])
+            cumulative_profit_chart(games['date'], games['cumulative'])
 
             st.markdown("**Monthly breakdown**")
             monthly = period_breakdown(active_pairs, mask, 'month', last_bet, last_tgt)
@@ -1742,7 +1860,7 @@ with tab5:
                                           .astype(float))
                 cum_data = cum_data.sort_values('date')
                 cum_data['cumulative'] = cum_data['profit'].cumsum()
-                st.line_chart(cum_data.set_index('date')['cumulative'])
+                cumulative_profit_chart(cum_data['date'], cum_data['cumulative'])
             except Exception:
                 st.caption("(Chart unavailable)")
 
