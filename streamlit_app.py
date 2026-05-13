@@ -58,6 +58,20 @@ def clean_result_series(s):
     return cleaned.replace({'NAN': np.nan, '': np.nan, 'NONE': np.nan, '#N/A': np.nan})
 
 
+def apply_operator(series, op, threshold):
+    """Apply a comparison operator to a series. Centralizes the logic so all four
+    operators (>, >=, <, <=) work correctly everywhere. Returns a boolean Series."""
+    if op == ">":
+        return series > threshold
+    if op == ">=":
+        return series >= threshold
+    if op == "<":
+        return series < threshold
+    if op == "<=":
+        return series <= threshold
+    raise ValueError(f"Unsupported operator: {op}")
+
+
 # ============================================================
 # BET TYPE CONFIG
 # ============================================================
@@ -243,6 +257,16 @@ def load_data(file_bytes):
     base['prior_rl_1']    = rl_result.shift(1)
     base['prior_rl_2']    = rl_result.shift(2)
 
+    # Validity flag for 2-row prior filters:
+    # row N-2 must belong to the same team & year as row N-1, otherwise the
+    # "2-row sequence" actually mixes the previous team's last game with the
+    # current team's last game. ~1.25% of pairs in real data fall in this bucket.
+    df_team_series = df.iloc[:, TEAM_I]
+    base['prior_2_valid'] = (
+        (df_team_series.shift(2) == df_team_series.shift(1)) &
+        (df['_year'].shift(2) == df['_year'].shift(1))
+    ).fillna(False)
+
     # Stat features in 3 modes
     stat_names = []
     raw_data, avg_data, ratio_data = {}, {}, {}
@@ -349,6 +373,17 @@ def prior_options(scope, values):
 def build_prior_mask(pairs, scope, ml_filter, total_filter, rl_filter):
     """Compose an AND mask of all selected prior-result filters."""
     mask = pd.Series(True, index=pairs.index)
+
+    # For scope=2, ANY active filter requires that row N-2 belongs to the same
+    # team-year as row N-1. Otherwise a "sequence" like OU would actually mix
+    # the previous team's last game (N-2) with the current team's last game (N-1).
+    has_any_filter = (
+        (ml_filter and ml_filter != 'None') or
+        (total_filter and total_filter != 'None') or
+        (rl_filter and rl_filter != 'None')
+    )
+    if scope == 2 and has_any_filter and 'prior_2_valid' in pairs.columns:
+        mask &= pairs['prior_2_valid'].fillna(False)
 
     def apply_one(prefix, filt):
         nonlocal mask
@@ -647,8 +682,11 @@ with st.spinner("Loading and pairing rows..."):
 
 if n_unsorted_groups > 0:
     st.error(
-        f"⛔ **Date order issue:** {n_unsorted_groups} team-year group(s) are not sorted by date. "
-        f"Avg/Ratio modes will be inaccurate. Sort CSV by Team, then Date ascending. Raw mode is unaffected."
+        f"⛔ **Date order issue:** {n_unsorted_groups} team-year group(s) are not in chronological order. "
+        f"Avg and Ratio modes need each team's rows ordered by date within a season — otherwise "
+        f"the running averages get computed in the wrong sequence. Re-export the CSV sorted "
+        f"primarily by Team (column B), then by Date ascending. This also keeps the existing "
+        f"row-before-comparative pair structure intact. Raw mode is unaffected and safe to use as-is."
     )
 
 # Active retargeted pairs for current bet type / target / mode
@@ -795,7 +833,7 @@ def reconstruct_fav_mask(fav, pairs_by_mode_base):
                 if col not in rpairs.columns:
                     return None, None, None, None, None
                 v = rpairs[col]
-                mask &= (v > t) if op == ">" else (v < t)
+                mask &= apply_operator(v, op, t)
             mask = mask.fillna(False) & prior
             return mask, saved_mode, saved_bet, saved_target, rpairs
     except Exception:
@@ -995,10 +1033,75 @@ with tab2:
     operator_choice = c2.multiselect("Operators", [">", "<"], default=[">", "<"], key="t2_op")
     st.caption("💡 Both `>` and `<` selected → tests every operator mix per combination.")
 
+    # Column inclusion/exclusion controls
+    excluded_cols = st.multiselect(
+        "Exclude these columns from search (optional)",
+        options=stat_names,
+        default=[],
+        key="t2_exclude",
+        help="Columns selected here will never appear in any tested pattern. "
+             "Useful for skipping noisy or duplicate stats.",
+    )
+
+    st.markdown("**Force-include (optional)** — lock a specific rule into every tested pattern")
+    fc1, fc2, fc3 = st.columns([3, 1, 1.5])
+    forced_options = ["(none — use top-N ranking only)"] + [c for c in stat_names if c not in excluded_cols]
+    forced_label = fc1.selectbox(
+        "Column",
+        options=forced_options,
+        index=0,
+        key="t2_force",
+        help="Every tested pattern will include this rule. The remaining N-1 columns "
+             "are picked from the top-N ranking. Useful for testing 'does X predict outcomes "
+             "when combined with anything else?'",
+    )
+    forced_col = None if forced_label.startswith("(none") else forced_label
+
+    # Operator + threshold only enabled when a column is selected
+    forced_op = fc2.selectbox(
+        "Operator",
+        options=[">", "<", ">=", "<="],
+        index=1,
+        key="t2_force_op",
+        disabled=(forced_col is None),
+    )
+    # Reasonable default threshold = median of the column's values in current pairs (if available)
+    _default_thresh = 0.0
+    if forced_col is not None and forced_col in pairs.columns:
+        try:
+            _default_thresh = float(pairs[forced_col].median())
+            if pd.isna(_default_thresh):
+                _default_thresh = 0.0
+        except Exception:
+            _default_thresh = 0.0
+    forced_thresh = fc3.number_input(
+        "Threshold",
+        value=_default_thresh,
+        format="%.4f",
+        key="t2_force_thresh",
+        disabled=(forced_col is None),
+        help="The exact value the forced column must satisfy. Example: '< 0.9913'.",
+    )
+
+    if forced_col is not None:
+        st.caption(f"🔒 Every tested pattern will include: `{forced_col} {forced_op} {forced_thresh:.4f}` AND ...")
+
     if operator_choice:
+        # Estimate respects exclusions and forced column
+        n_eligible_cols = len([c for c in stat_names if c not in excluded_cols])
+        effective_top_n = min(top_n, n_eligible_cols)
         atoms_per_col = len(operator_choice) * n_thresholds
         try:
-            combos_est = comb(top_n, n_combo) * (atoms_per_col ** n_combo)
+            if forced_col is not None:
+                # Forced column is PINNED to exactly 1 atom (the user's op+threshold).
+                # Pick (n_combo - 1) others from the top_n pool (excluding the forced column).
+                others_pool = max(0, min(top_n, n_eligible_cols - 1))
+                if n_combo - 1 == 0:
+                    combos_est = 1
+                else:
+                    combos_est = comb(others_pool, n_combo - 1) * (atoms_per_col ** (n_combo - 1))
+            else:
+                combos_est = comb(effective_top_n, n_combo) * (atoms_per_col ** n_combo)
         except Exception:
             combos_est = 0
         if combos_est > 200_000:
@@ -1034,14 +1137,29 @@ with tab2:
 
     if run_search:
         active_pool = pairs[prior_mask].copy()
+
+        # If a forced rule is set, only rank/search rows that already satisfy it.
+        # This finds the columns that predict best GIVEN the forced condition.
+        if forced_col is not None:
+            v = active_pool[forced_col]
+            forced_rule_mask = apply_operator(v, forced_op, forced_thresh).fillna(False)
+            active_pool = active_pool[forced_rule_mask].copy()
+
         if len(active_pool) < 30:
-            st.error(f"Only {len(active_pool)} valid rows after prior-filters — too few to search.")
+            st.error(f"Only {len(active_pool)} valid rows after prior-filters"
+                     + (f" + forced rule" if forced_col else "")
+                     + " — too few to search.")
         else:
             with st.spinner("Ranking single columns..."):
                 # Edge proxy: how far from 50/50 win rate at median split
                 target_series = (active_pool['result'] == target)
                 single_scores = []
                 for col in stat_names:
+                    if col in excluded_cols:
+                        continue
+                    if col == forced_col:
+                        # Skip ranking the forced col against itself — it's pinned
+                        continue
                     vals = active_pool[col].fillna(active_pool[col].median())
                     if vals.isna().all():
                         continue
@@ -1057,8 +1175,14 @@ with tab2:
                 single_scores.sort(key=lambda x: -x[1])
                 top_cols = [c for c, _ in single_scores[:top_n]]
 
-            st.write(f"Testing combos of {n_combo} from top {len(top_cols)} columns over {len(active_pool):,} rows.")
+                # Defensively drop any excluded items
+                top_cols = [c for c in top_cols if c not in excluded_cols]
 
+            forced_str = f" Forced: `{forced_col} {forced_op} {forced_thresh:.4f}`" if forced_col else ""
+            st.write(f"Testing combos of {n_combo} from {len(top_cols)} candidate columns "
+                     f"over {len(active_pool):,} rows.{forced_str}")
+
+            # Build thresholds for the "other" columns (not the forced one)
             thresh_per_col = {}
             for col in top_cols:
                 vals = active_pool[col].dropna()
@@ -1075,7 +1199,19 @@ with tab2:
                     for t in thresh_per_col[col]:
                         atoms.append((col, op, t))
 
-            combos_list = list(combinations(atoms, n_combo))
+            if forced_col is not None:
+                # The forced column is PINNED to exactly one atom (user's op + threshold).
+                pinned_atom = (forced_col, forced_op, float(forced_thresh))
+                if n_combo - 1 <= 0:
+                    combos_list = [(pinned_atom,)]
+                else:
+                    other_combos = list(combinations(atoms, n_combo - 1))
+                    other_combos = [c for c in other_combos if len({a[0] for a in c}) == len(c)]
+                    combos_list = [(pinned_atom,) + oc for oc in other_combos]
+            else:
+                combos_list = list(combinations(atoms, n_combo))
+
+            # Always dedup combos using the same column twice (defensive)
             combos_list = [c for c in combos_list if len({a[0] for a in c}) == len(c)]
             st.info(f"Evaluating {len(combos_list):,} combinations...")
 
@@ -1090,7 +1226,7 @@ with tab2:
                 cmask = prior_mask.copy()
                 for col, op, t in combo:
                     v = pairs[col]
-                    cmask &= (v > t) if op == ">" else (v < t)
+                    cmask &= apply_operator(v, op, t)
                 cmask = cmask.fillna(False)
 
                 stats = evaluate_mask(pairs, cmask, bet_type, target)
@@ -1144,35 +1280,47 @@ with tab2:
         if st.button("Load this pattern into Inspect tab", key="t2_load"):
             combo = lb.iloc[idx]['_combo']
             meta = st.session_state.get('leaderboard_meta', {})
-            cmask = prior_mask.copy()
+
+            # CRITICAL: rebuild against the SAVED settings (not current sidebar state),
+            # because the user may have changed bet type / target / mode / priors
+            # since the search ran. The leaderboard rows are only valid against the
+            # configuration in effect when the search was kicked off.
+            saved_mode   = meta.get('mode', mode_key)
+            saved_bet    = meta.get('bet_type', bet_type)
+            saved_target = meta.get('target', target)
+            saved_scope  = meta.get('prior_scope', prior_scope)
+            saved_mlf    = meta.get('ml_prior_filter', ml_prior_filter)
+            saved_ttf    = meta.get('total_prior_filter', total_prior_filter)
+            saved_rlf    = meta.get('rl_prior_filter', rl_prior_filter)
+
+            saved_pairs = retarget_pairs(pairs_by_mode_base[saved_mode], saved_bet, saved_target)
+            saved_prior_mask = build_prior_mask(saved_pairs, saved_scope, saved_mlf, saved_ttf, saved_rlf)
+
+            cmask = saved_prior_mask.copy()
             for col, op, t in combo:
-                v = pairs[col]
-                cmask &= (v > t) if op == ">" else (v < t)
+                v = saved_pairs[col]
+                cmask &= apply_operator(v, op, t)
             cmask = cmask.fillna(False)
 
-            saved_bet = meta.get('bet_type', bet_type)
-            saved_target = meta.get('target', target)
+            saved_label = build_filter_label(saved_scope, saved_mlf, saved_ttf, saved_rlf)
             eq_label = lb.iloc[idx]['pattern']
-            if meta and build_filter_label(meta['prior_scope'],
-                                            meta['ml_prior_filter'],
-                                            meta['total_prior_filter'],
-                                            meta['rl_prior_filter']) != "No prior-result filters":
-                eq_label += f"  |  {build_filter_label(meta['prior_scope'], meta['ml_prior_filter'], meta['total_prior_filter'], meta['rl_prior_filter'])}"
+            if saved_label != "No prior-result filters":
+                eq_label += f"  |  {saved_label}"
 
             st.session_state['last_mask'] = cmask
-            st.session_state['last_eq'] = f"[{saved_bet}/{saved_target} · {mode_label}] " + eq_label
-            st.session_state['last_mode'] = mode_key
+            st.session_state['last_eq'] = f"[{saved_bet}/{saved_target} · {saved_mode.title()}] " + eq_label
+            st.session_state['last_mode'] = saved_mode
             st.session_state['last_bet_type'] = saved_bet
             st.session_state['last_target'] = saved_target
             st.session_state['last_structured'] = {
                 'type': 'threshold_combo',
-                'mode': mode_key,
+                'mode': saved_mode,
                 'bet_type': saved_bet,
                 'target': saved_target,
-                'prior_scope': meta.get('prior_scope', prior_scope),
-                'ml_prior_filter': meta.get('ml_prior_filter', ml_prior_filter),
-                'total_prior_filter': meta.get('total_prior_filter', total_prior_filter),
-                'rl_prior_filter': meta.get('rl_prior_filter', rl_prior_filter),
+                'prior_scope': saved_scope,
+                'ml_prior_filter': saved_mlf,
+                'total_prior_filter': saved_ttf,
+                'rl_prior_filter': saved_rlf,
                 'combo': [[col, op, float(t)] for col, op, t in combo],
             }
             st.success("Loaded. Switch to Inspect Games tab.")
@@ -1238,9 +1386,22 @@ with tab3:
                 st.error(f"Not enough data after split. Train: {len(train)}, Test: {len(test)}")
                 st.stop()
 
-            X_train = train[stat_names].fillna(train[stat_names].median())
-            X_test = test[stat_names].fillna(train[stat_names].median())
             y_train = (train['result'] == target).astype(int)
+
+            # One-class protection: logistic regression cannot train if all train rows
+            # are the same class (e.g. all O, no U). Surface this cleanly.
+            if y_train.nunique() < 2:
+                st.error(
+                    f"Training data only has one class for target **{target}** "
+                    f"(all rows are {'target' if y_train.sum() else 'non-target'}). "
+                    "Loosen prior filters, switch target, or pick another split year."
+                )
+                st.stop()
+
+            # Compute medians once, replacing any all-NaN-column medians with 0
+            medians = train[stat_names].median().fillna(0)
+            X_train = train[stat_names].fillna(medians)
+            X_test  = test[stat_names].fillna(medians)
 
             scaler = StandardScaler()
             X_train_s = scaler.fit_transform(X_train)
@@ -1374,7 +1535,13 @@ with tab4:
             st.warning("No matched games.")
         else:
             games['cumulative'] = games['profit'].fillna(0).cumsum().round(2)
-            display_cols = ['date', 'team', 'home_team', 'result', 'risk', 'profit', 'cumulative', 'odds']
+            # Show the active market's result plus the other two markets' outcomes —
+            # so when inspecting (e.g.) a Totals pattern you can see whether the
+            # same game also won ML or Runline.
+            display_cols = ['date', 'team', 'home_team', 'result',
+                             'ml_result', 'tt_result', 'rl_result',
+                             'risk', 'profit', 'cumulative', 'odds']
+            display_cols = [c for c in display_cols if c in games.columns]
             games_display = games[display_cols].copy()
 
             ac1, ac2, _ = st.columns([2, 2, 2])
@@ -1551,8 +1718,11 @@ with tab5:
             if rmask is not None:
                 rb = rpairs[rmask].sort_values('date').reset_index(drop=True).copy()
                 rb['cumulative'] = rb['profit'].fillna(0).cumsum().round(2)
-                games_to_show = rb[['date', 'team', 'home_team', 'result',
-                                     'risk', 'profit', 'cumulative', 'odds']]
+                cols = ['date', 'team', 'home_team', 'result',
+                         'ml_result', 'tt_result', 'rl_result',
+                         'risk', 'profit', 'cumulative', 'odds']
+                cols = [c for c in cols if c in rb.columns]
+                games_to_show = rb[cols]
                 monthly = period_breakdown(rpairs, rmask, 'month', rbet, rtgt)
                 yearly  = period_breakdown(rpairs, rmask, 'year',  rbet, rtgt)
                 st.caption(f"ℹ️ Rebuilt from saved pattern in **{rbet}/{rtgt} · {rmode.title()}** mode.")
