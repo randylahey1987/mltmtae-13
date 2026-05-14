@@ -715,8 +715,8 @@ with st.sidebar:
 if uploaded is None:
     st.info(
         "👈 Upload your CSV to begin. The app expects the new aggregated layout: "
-        "DG/DH/DI = Moneyline result/risk/profit, DL/DM/DN = Totals, DP/DQ/DR = Runline. "
-        "Predictors come from columns I:CL plus CZ (open ML), DA (open total line), DC (closing runline)."
+        n/"DG/DH/DI = Moneyline result/risk/profit, DL/DM/DN = Totals, DP/DQ/DR = Runline. "
+        n/"Predictors come from columns I:CL plus CZ (open ML), DA (open total line), DC (closing runline)."
     )
     st.stop()
 
