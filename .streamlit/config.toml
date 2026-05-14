@@ -3,7 +3,7 @@
 # Keeps the dark-mode aesthetic but trades red's "danger" feel for an
 # analytical/data-mining vibe. Easy to swap — just change primaryColor below.
 base = "dark"
-primaryColor = "#00D9D9"
+primaryColor = "#0b9e9e"
 backgroundColor = "#0E1117"
 secondaryBackgroundColor = "#1E2530"
 textColor = "#FAFAFA"
