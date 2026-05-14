@@ -1,0 +1,10 @@
+[theme]
+# Cyan accent for primary buttons (Run backtest / Run search / Train model).
+# Keeps the dark-mode aesthetic but trades red's "danger" feel for an
+# analytical/data-mining vibe. Easy to swap — just change primaryColor below.
+base = "dark"
+primaryColor = "#00D9D9"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1E2530"
+textColor = "#FAFAFA"
+font = "sans serif"
