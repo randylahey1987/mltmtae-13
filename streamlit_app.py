@@ -1447,6 +1447,11 @@ with tab2:
                 # keeps the brute-force loop fast (no work on rejected combos)
                 yrs_prof, yrs_total, worst_yr, best_yr = _yearly_stats_for_mask(cmask)
 
+                # Simple-mean per-year metrics: total_profit and roi divided by number
+                # of years the pattern actually occurred in.
+                avg_profit_per_year = (stats['total_profit'] / yrs_total) if yrs_total > 0 else np.nan
+                avg_roi_per_year    = (stats['roi'] / yrs_total) if (yrs_total > 0 and pd.notna(stats['roi'])) else np.nan
+
                 desc = " AND ".join([f"{c}{op}{t}" for c, op, t in combo])
                 results.append({
                     'pattern': desc,
@@ -1455,6 +1460,8 @@ with tab2:
                     'yrs_total': yrs_total,
                     'worst_year': round(worst_yr, 2),
                     'best_year': round(best_yr, 2),
+                    'avg_profit_per_year': round(avg_profit_per_year, 2) if pd.notna(avg_profit_per_year) else np.nan,
+                    'avg_roi_per_year':    round(avg_roi_per_year, 4)    if pd.notna(avg_roi_per_year)    else np.nan,
                     '_combo': combo,
                 })
 
@@ -1477,17 +1484,20 @@ with tab2:
     if 'leaderboard' in st.session_state:
         lb = st.session_state['leaderboard']
         st.markdown("**Leaderboard** — yearly consistency columns help spot non-overfit patterns. "
-                    "Sort by `yrs_profitable` to find patterns that worked across every season.")
+                    "Sort by `yrs_profitable` to find patterns that worked across every season. "
+                    "Click any column header in the table to sort by it.")
         sort_col = st.selectbox(
             "Sort by",
             ['total_profit', 'roi', 'target_rate', 'count',
-             'yrs_profitable', 'worst_year', 'best_year'],
+             'yrs_profitable', 'worst_year', 'best_year',
+             'avg_profit_per_year', 'avg_roi_per_year'],
             key="t2_sort",
         )
         ascending = st.checkbox("Ascending (worst first — useful for fades)", value=False, key="t2_asc")
         display = lb.drop(columns='_combo').sort_values(sort_col, ascending=ascending).head(100).copy()
 
-        # Combine yrs_profitable + yrs_total into a single "Yrs Prof" column (e.g. "4/4")
+        # Combine yrs_profitable + yrs_total into a single "Yrs Prof" string column
+        # (this is the only column that's intentionally a string — pure label, never sorted as number)
         if 'yrs_profitable' in display.columns and 'yrs_total' in display.columns:
             display['Yrs Prof'] = display.apply(
                 lambda r: f"{int(r['yrs_profitable'])}/{int(r['yrs_total'])}"
@@ -1500,26 +1510,61 @@ with tab2:
         if 'pushes' in display.columns and not push_val:
             display = display.drop(columns='pushes')
 
-        # Format money + percentages
-        display['target_rate'] = display['target_rate'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
-        display['roi'] = display['roi'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
-        display['total_profit'] = display['total_profit'].apply(_fmt_money)
-        display['avg_profit'] = display['avg_profit'].apply(_fmt_money)
-        display['lowest'] = display['lowest'].apply(_fmt_money)
-        if 'worst_year' in display.columns:
-            display['worst_year'] = display['worst_year'].apply(_fmt_money)
-        if 'best_year' in display.columns:
-            display['best_year'] = display['best_year'].apply(_fmt_money)
+        # CRITICAL: keep all numeric columns as NUMBERS, not formatted strings.
+        # Pandas/Streamlit sort strings character-by-character ("$1,394" < "$993")
+        # which breaks every dollar-column sort. The column_config below formats
+        # on render while preserving the underlying numeric values for sorting.
 
         # Reorder columns: pattern first, then key stats, then yearly consistency, then rest
         preferred = ['pattern', 'count', 'target', 'other']
         if 'pushes' in display.columns: preferred.append('pushes')
         preferred += ['target_rate', 'total_profit', 'roi', 'lowest',
-                       'Yrs Prof', 'worst_year', 'best_year', 'avg_profit']
+                       'Yrs Prof', 'worst_year', 'best_year',
+                       'avg_profit_per_year', 'avg_roi_per_year',
+                       'avg_profit']
         cols_in_order = [c for c in preferred if c in display.columns] + \
                          [c for c in display.columns if c not in preferred]
         display = display[cols_in_order]
-        st.dataframe(display, use_container_width=True, height=600)
+
+        # Render-time formatting via column_config — values stay numeric for sorting
+        col_cfg = {
+            'pattern':              st.column_config.TextColumn('Pattern', width='large'),
+            'count':                st.column_config.NumberColumn('Count', format='%d'),
+            'target':               st.column_config.NumberColumn(label='Target'),
+            'other':                st.column_config.NumberColumn(label='Other'),
+            'pushes':               st.column_config.NumberColumn(label='Pushes'),
+            'target_rate':          st.column_config.NumberColumn('Target Rate', format='%.1f%%',
+                                                                    help='Target wins ÷ (Target + Other). Pushes excluded.'),
+            'total_profit':         st.column_config.NumberColumn('Total $', format='$%.2f'),
+            'roi':                  st.column_config.NumberColumn('ROI', format='%.1f%%',
+                                                                    help='Total profit ÷ total risk.'),
+            'lowest':               st.column_config.NumberColumn('Lowest Pt', format='$%.2f',
+                                                                    help='Worst cumulative-profit point.'),
+            'Yrs Prof':             st.column_config.TextColumn('Yrs Prof',
+                                                                  help='Profitable years / total years the pattern occurred.'),
+            'worst_year':           st.column_config.NumberColumn('Worst Year', format='$%.2f',
+                                                                    help='Single worst year for this pattern.'),
+            'best_year':            st.column_config.NumberColumn('Best Year', format='$%.2f',
+                                                                    help='Single best year for this pattern.'),
+            'avg_profit_per_year':  st.column_config.NumberColumn('Avg $/Yr', format='$%.2f',
+                                                                    help='Mean per year: total_profit ÷ number of years the pattern occurred in.'),
+            'avg_roi_per_year':     st.column_config.NumberColumn('Avg ROI/Yr', format='%.1f%%',
+                                                                    help='Mean per year: total ROI ÷ number of years the pattern occurred in.'),
+            'avg_profit':           st.column_config.NumberColumn('Avg $/Bet', format='$%.2f',
+                                                                    help='Mean profit per individual matched bet.'),
+        }
+        # Convert ROI-style values to percentage-points for display (e.g. 0.184 → 18.4)
+        # because column_config's `%.1f%%` expects a percentage scale, not a fraction.
+        display_render = display.copy()
+        for pct_col in ('target_rate', 'roi', 'avg_roi_per_year'):
+            if pct_col in display_render.columns:
+                display_render[pct_col] = display_render[pct_col] * 100
+
+        st.dataframe(display_render,
+                      use_container_width=True,
+                      height=600,
+                      hide_index=True,
+                      column_config=col_cfg)
 
         st.download_button("📥 Download leaderboard CSV",
                             lb.drop(columns='_combo').to_csv(index=False),
